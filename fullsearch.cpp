@@ -1,0 +1,245 @@
+#include "fullsearch.h"
+#include "solution.h"
+#include "graph.h"
+#include <algorithm>
+#include <vector>
+#include <omp.h>
+#include <iostream>
+
+using namespace std;
+
+solution * getSimpleFullSearchSolution(graph *g, int threads_num)
+{
+	double startTime = omp_get_wtime();
+	omp_set_num_threads(threads_num);
+	solution *s = createNewSolution(g->n);
+	
+	int allMasks = (1 << g->n);
+	int *thread_submasks = new int[threads_num];
+	int *chroms = new int[allMasks];
+	int *parent = new int[allMasks];
+	int *sets = new int[allMasks];
+	int C = 32;
+	int **table = new int *[C];
+	for (int i = 0; i < C; i++)
+		table[i] = new int[allMasks];
+	int *tableSizes = new int[C];
+	
+	sets[0] = 1;
+	for (int mask = 1; mask < allMasks; mask++)
+	{
+		sets[mask] = 1;
+		int submask = (mask & (mask - 1));
+		int bit = mask ^ submask;
+		if (sets[submask])
+		{
+			for (int i = 0; i < g->n; i++)
+			{
+				if ((1 << i) & bit)
+				{
+					for (int j = 0; j < g->n; j++)
+					{
+						if (((1 << j) & submask) && g->a[i][j])
+						{
+							sets[mask] = 0;
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			sets[mask] = 0;
+		}
+	}
+	
+	chroms[0] = 0;
+	for (int mask = 1; mask < allMasks; mask++)
+	{
+		if (mask == 1 || mask % C == 0)
+		{
+			int cmask = mask;
+			if (cmask == 1)
+			{
+				cmask = 0;
+			}
+			#pragma omp parallel for
+			for (int i = cmask; i < cmask + C; i++)
+			{
+				tableSizes[i & (C - 1)] = 0;
+				for (int submask = i; submask; submask = ((submask - 1) & i))
+				{
+					table[i & (C - 1)][tableSizes[i & (C - 1)]++] = submask;
+				}
+			}
+		}
+		
+		
+		for (int i = 0; i < threads_num; i++)
+		{
+			thread_submasks[i] = -1;
+		}
+		
+		#pragma omp parallel for
+		for (int i = 0; i < tableSizes[mask & (C - 1)]; i++)
+		{
+			int submask = table[mask & (C - 1)][i];
+			if (sets[submask])
+			{
+				int maskxor = mask ^ submask;
+				int num = omp_get_thread_num();
+				if (thread_submasks[num] == -1 || chroms[thread_submasks[num]] > chroms[maskxor])
+				{
+					thread_submasks[num] = maskxor;
+				}
+			}
+		}
+		
+		int maskxor = -1;
+		for (int i = 0; i < threads_num; i++)
+		{
+			if (maskxor == -1 || (thread_submasks[i] != -1 && chroms[thread_submasks[i]] < chroms[maskxor]))
+			{
+				maskxor = thread_submasks[i];
+			}
+		}
+		
+		parent[mask] = maskxor;
+		chroms[mask] = chroms[maskxor] + 1;
+	}
+	
+	s->colorsCount = 0;
+	for (int mask = allMasks - 1; mask; mask = parent[mask])
+	{
+		int maskxor = mask ^ parent[mask];
+		for (int i = 0; i < g->n; i++)
+		{
+			if ((1 << i) & maskxor)
+			{
+				s->colors[i] = s->colorsCount;
+			}
+		}
+		s->colorsCount++;
+	}
+	
+	
+	delete tableSizes;
+	for (int i = 0; i < C; i++)
+		delete table[i];
+	delete table;
+	delete sets;
+	delete parent;
+	delete chroms;
+	delete thread_submasks;	
+	
+	s->time = omp_get_wtime() - startTime;
+	return s;
+}
+
+
+solution * getHardFullSearchSolution(graph *g, int threads_num)
+{
+	double startTime = omp_get_wtime();
+	omp_set_num_threads(threads_num);
+	solution *s = createNewSolution(g->n);
+	
+	int *adjacent_masks = new int[g->n];
+	for (int i = 0; i < g->n; i++)
+	{
+		adjacent_masks[i] = 0;
+		for (int j = 0; j < g->n; j++)
+		{
+			if (g->a[i][j])
+			{
+				adjacent_masks[i] |= (1 << j);
+			}
+		} 
+	}
+	
+	int allMasks = (1 << g->n);
+	
+	int *h = new int[allMasks];
+	h[0] = 1;
+	for (int mask = 1; mask < allMasks; mask++)
+	{
+		for (int i = 0; i < g->n; i++)
+		{
+			if (mask & (1 << i))
+			{
+				h[mask] = h[mask ^ (1 << i)] + h[mask & (mask ^ adjacent_masks[i] ^ (1 << i))];
+				break;
+			}
+		}
+	}
+	
+	int *bits = new int[allMasks];
+	bits[0] = 0;
+	for (int mask = 1; mask < allMasks; mask++)
+	{
+		bits[mask] = bits[mask & (mask - 1)] ^ 1;
+	}
+	
+	int *thread_sum = new int[threads_num];
+	for (int i = 0; i < threads_num; i++)
+	{
+		thread_sum[i] = 0;
+	}
+	
+	long long MOD = 1000000007;
+	long long *f = new long long[allMasks];
+	for (int mask = 0; mask < allMasks; mask++)
+	{
+		f[mask] = 1;
+	}
+	for (int k = 1; k <= g->n; k++)
+	{
+		#pragma omp parallel for
+		for (int mask = 0; mask < allMasks; mask++)
+		{
+			f[mask] = (f[mask] * h[mask]) % MOD;
+		}
+		
+		for (int i = 0; i < threads_num; i++)
+		{
+			thread_sum[i] = 0;
+		}
+		
+		#pragma omp parallel for
+		for (int mask = 0; mask < allMasks; mask++)
+		{
+			int num = omp_get_thread_num();
+			if (bits[mask] ^ bits[allMasks - 1])
+			{
+				thread_sum[num] -= f[mask];
+			}
+			else
+			{
+				thread_sum[num] += f[mask];
+			}
+			if (thread_sum[num] < 0)
+				thread_sum[num] += MOD;
+			if (thread_sum[num] >= MOD)
+				thread_sum[num] -= MOD;
+		}
+		
+		int sum = 0;
+		for (int i = 0; i < threads_num; i++)
+		{
+			sum = (sum + thread_sum[i]) % MOD;
+		}
+		
+		if (sum)
+		{
+			s->colorsCount = k;
+			break;
+		}
+	}
+	
+	s->time = omp_get_wtime() - startTime;
+	delete f;
+	delete thread_sum;
+	delete bits;
+	delete h;
+	delete adjacent_masks;
+	return s;	
+}
